@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 
 # Add project root to Python path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -33,6 +34,7 @@ def main():
         
         # Create Qt Application
         app = QApplication(sys.argv)
+        app.setWindowIcon(QIcon("assets/app_icon.png"))
         
         # Set application metadata
         app.setApplicationName(config.APP_NAME)

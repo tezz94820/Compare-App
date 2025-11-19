@@ -1,5 +1,5 @@
 build
-venv
 dist
-myenv
+appvenv
 __pycache__
+app
