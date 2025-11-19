@@ -1,3 +1,5 @@
 build
 venv
 dist
+myenv
+__pycache__
