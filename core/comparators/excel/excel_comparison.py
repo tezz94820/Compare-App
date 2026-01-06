@@ -45,12 +45,13 @@ def compare_excel_page_worker(page_num, dev_rows, prod_rows):
 class ExcelComparator:
     """Professional Excel comparison with sheet-by-sheet and page-by-page analytics."""
     
-    def __init__(self, dev_excel: str, prod_excel: str, output_dir: str = "reports", page_rows: int = 80):
+    def __init__(self, dev_excel: str, prod_excel: str, output_dir: str = "reports", page_rows: int = 80, progress_cb=None):
         self.dev_excel = Path(dev_excel)
         self.prod_excel = Path(prod_excel)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.page_rows = page_rows  # Rows per page
+        self.progress_cb = progress_cb
         
         self.dev_sheets = OrderedDict()  # {sheet_name: list of pages}
         self.prod_sheets = OrderedDict()
@@ -122,6 +123,12 @@ class ExcelComparator:
         total_sheets = len(all_sheet_names)
         print(f"      Comparing {total_sheets} sheets...", end='', flush=True)
 
+        completed_pages = 0
+        total_pages = sum(
+            max(len(self.dev_sheets.get(s, [])), len(self.prod_sheets.get(s, [])))
+            for s in set(self.dev_sheets) | set(self.prod_sheets)
+        )
+
         for sheet_name in sorted(all_sheet_names):
             dev_pages = self.dev_sheets.get(sheet_name, [])
             prod_pages = self.prod_sheets.get(sheet_name, [])
@@ -153,6 +160,9 @@ class ExcelComparator:
                 for future in as_completed(futures):
                     p = futures[future]
                     results[p] = future.result()
+                    completed_pages += 1
+                    if self.progress_cb:
+                        self.progress_cb(completed_pages, total_pages)
 
             # build final pages
             for page_num in sorted(results.keys()):

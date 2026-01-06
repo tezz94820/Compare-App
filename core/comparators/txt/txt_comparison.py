@@ -46,12 +46,13 @@ def compare_page_worker(page_num, dev_page_lines, prod_page_lines):
 class TXTComparator:
     """Professional TXT comparison with page-by-page analytics."""
     
-    def __init__(self, dev_txt: str, prod_txt: str, output_dir: str = "reports", page_lines: int = 500):
+    def __init__(self, dev_txt: str, prod_txt: str, output_dir: str = "reports", page_lines: int = 500, progress_cb=None):
         self.dev_txt = Path(dev_txt)
         self.prod_txt = Path(prod_txt)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.page_lines = page_lines  # Lines per page
+        self.progress_cb = progress_cb
         
         self.dev_page_count = 0
         self.prod_page_count = 0
@@ -123,6 +124,8 @@ class TXTComparator:
     def compare_pages_streaming(self, dev_pages: List[List[str]], prod_pages: List[List[str]]):
         """Compare TXT files page by page with PARALLEL processing."""
         max_pages = max(len(dev_pages), len(prod_pages))
+        completed_count = 0
+        total_pages = max_pages
         
         # Initialize counters for incremental analytics
         total_added = 0
@@ -176,8 +179,10 @@ class TXTComparator:
                     # Thread-safe progress update
                     with self.progress_lock:
                         completed_count += 1
+                        if self.progress_cb:
+                            self.progress_cb(completed_count, total_pages)
                         print(f"\r      Comparing {max_pages} pages in parallel... {completed_count}/{max_pages}", end='', flush=True)
-                    
+
                 except Exception as e:
                     print(f"\n      ⚠️ Error processing page {page_num + 1}: {e}")
                     # Create empty result for failed page

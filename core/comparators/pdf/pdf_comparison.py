@@ -55,11 +55,12 @@ def pdf_page_worker(page_num, dev_content, prod_content):
 class PDFComparator:
     """Professional PDF comparison with page-by-page analytics."""
     
-    def __init__(self, dev_pdf: str, prod_pdf: str, output_dir: str = "reports"):
+    def __init__(self, dev_pdf: str, prod_pdf: str, output_dir: str = "reports", progress_cb=None):
         self.dev_pdf = Path(dev_pdf)
         self.prod_pdf = Path(prod_pdf)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.progress_cb = progress_cb
         
         self.dev_page_count = 0
         self.prod_page_count = 0
@@ -124,6 +125,9 @@ class PDFComparator:
 
         print(f"      Comparing {max_pages} pages...", end="", flush=True)
 
+        completed_pages = 0
+        total_pages = max_pages
+        
         # MULTIPROCESSING EXECUTION
         with ProcessPoolExecutor() as executor:
             future_to_page = {
@@ -144,6 +148,10 @@ class PDFComparator:
                     similarity_weight,
                     page_total_chars,
                 ) = future.result()
+
+                completed_pages += 1
+                if self.progress_cb:
+                    self.progress_cb(completed_pages, total_pages)
 
                 # Save final page result
                 self.page_diffs.append({

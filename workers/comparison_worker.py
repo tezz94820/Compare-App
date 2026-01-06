@@ -57,6 +57,7 @@ class ComparisonWorker(QThread):
         
         logger.info("Comparison worker initialized")
     
+    
     def run(self):
         """Main worker thread execution"""
         try:
@@ -90,32 +91,46 @@ class ComparisonWorker(QThread):
                 
                 # Update progress
                 file_name = f"{mapping['dev']} ↔ {mapping['prod']}"
-                percentage = (idx / total_files) * 100
-                self.progress_updated.emit(idx, total_files, file_name, percentage)
+                # percentage = (idx / total_files) * 100
+                # self.progress_updated.emit(idx, total_files, file_name, percentage)
                 
                 logger.info(f"[{idx}/{total_files}] Comparing: {mapping['dev']} vs {mapping['prod']}")
                 
+                file_base = idx - 1
+
+                def page_progress_cb(done_pages, total_pages):
+                    file_fraction = done_pages / total_pages
+                    overall_fraction = (file_base + file_fraction) / total_files
+                    percentage = overall_fraction * 100
+
+                    self.progress_updated.emit(
+                        idx, total_files, file_name, percentage
+                    )
+
                 # Run comparison
                 try:
                     if(app_state.get_file_type() == 'pdf'):
                         comparator = PDFComparator(
                             str(mapping['dev_path']),
                             str(mapping['prod_path']),
-                            str(self.output_folder)
+                            str(self.output_folder),
+                            progress_cb=page_progress_cb
                         )
                     elif(app_state.get_file_type() == 'excel'):
                         comparator = ExcelComparator(
                             str(mapping['dev_path']),
                             str(mapping['prod_path']),
                             str(self.output_folder),
-                            80
+                            80,
+                            progress_cb=page_progress_cb
                         )
                     elif(app_state.get_file_type() == 'txt'):
                         comparator = TXTComparator(
                             str(mapping['dev_path']),
                             str(mapping['prod_path']),
                             str(self.output_folder),
-                            80
+                            80,
+                            progress_cb=page_progress_cb
                         )
                     
                     report_path, analytics = comparator.compare()
