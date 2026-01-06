@@ -71,7 +71,7 @@ class ExcelComparator:
 
         try:
             # Fastest possible openpyxl loading mode
-            workbook = openpyxl.load_workbook(excel_path, data_only=True)
+            workbook = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
 
             for sheet_name in workbook.sheetnames:
                 print(f"      Processing sheet '{sheet_name}'...", end='', flush=True)
@@ -83,6 +83,8 @@ class ExcelComparator:
                 for row in sheet.iter_rows(values_only=True):
                     # Convert row tuple to list of string values
                     row_strings = []
+                    if not any(row):
+                        continue
 
                     for val in row:
                         if val is None:
