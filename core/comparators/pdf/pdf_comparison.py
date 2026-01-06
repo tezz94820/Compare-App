@@ -14,6 +14,42 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Set
 from collections import Counter
 import gc
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+
+def pdf_page_worker(page_num, dev_content, prod_content):
+    dev_lines = dev_content.splitlines()
+    prod_lines = prod_content.splitlines()
+
+    differ = difflib.Differ()
+    diff = list(differ.compare(dev_lines, prod_lines))
+
+    added = len([l for l in diff if l.startswith('+ ')])
+    removed = len([l for l in diff if l.startswith('- ')])
+    changed = len([l for l in diff if l.startswith('? ')]) // 2
+    unchanged = len([l for l in diff if l.startswith('  ')])
+
+    # Weighted similarity
+    page_total = len(dev_content) + len(prod_content)
+    if page_total > 0:
+        matcher = difflib.SequenceMatcher(None, dev_content, prod_content)
+        similarity = matcher.ratio() * page_total
+    else:
+        similarity = 0
+
+    return (
+        page_num,
+        dev_lines,
+        prod_lines,
+        diff,
+        added,
+        removed,
+        changed,
+        unchanged,
+        similarity,
+        page_total,
+    )
+
 
 
 class PDFComparator:
@@ -71,50 +107,77 @@ class PDFComparator:
         total_chars = 0
         
         print(f"      Comparing {max_pages} pages...", end='', flush=True)
-        
+      
+        # Prepare tasks
+        tasks = []
         for page_num in range(max_pages):
             dev_content = dev_pages[page_num] if page_num < len(dev_pages) else ""
             prod_content = prod_pages[page_num] if page_num < len(prod_pages) else ""
-            
-            dev_lines = dev_content.splitlines()
-            prod_lines = prod_content.splitlines()
-            
-            differ = difflib.Differ()
-            diff = list(differ.compare(dev_lines, prod_lines))
-            
-            # Count changes for this page
-            page_added = len([l for l in diff if l.startswith('+ ')])
-            page_removed = len([l for l in diff if l.startswith('- ')])
-            page_changed = len([l for l in diff if l.startswith('? ')]) // 2
-            page_unchanged = len([l for l in diff if l.startswith('  ')])
-            
-            total_added += page_added
-            total_removed += page_removed
-            total_changed += page_changed
-            total_unchanged += page_unchanged
-            
-            # Calculate page-level similarity for incremental average
-            page_total = len(dev_content) + len(prod_content)
-            if page_total > 0:
-                matcher = difflib.SequenceMatcher(None, dev_content, prod_content)
-                matching_chars += matcher.ratio() * page_total
-                total_chars += page_total
-            
-            self.page_diffs.append({
-                'page_num': page_num + 1,
-                'dev_lines': dev_lines,
-                'prod_lines': prod_lines,
-                'diff': diff
-            })
-            
-            # Progress indicator
-            if (page_num + 1) % 100 == 0:
-                print(f"\r      Comparing {max_pages} pages... {page_num + 1}/{max_pages}", end='', flush=True)
-            
-            # Clear memory periodically for very large files
-            if (page_num + 1) % 500 == 0:
-                gc.collect()
-        
+            tasks.append((page_num, dev_content, prod_content))
+
+        total_added = 0
+        total_removed = 0
+        total_changed = 0
+        total_unchanged = 0
+        matching_chars = 0
+        total_chars = 0
+
+        print(f"      Comparing {max_pages} pages...", end="", flush=True)
+
+        # MULTIPROCESSING EXECUTION
+        with ProcessPoolExecutor() as executor:
+            future_to_page = {
+                executor.submit(pdf_page_worker, page_num, dev, prod): page_num
+                for (page_num, dev, prod) in tasks
+            }
+
+            for idx, future in enumerate(as_completed(future_to_page)):
+                (
+                    page_num,
+                    dev_lines,
+                    prod_lines,
+                    diff,
+                    added,
+                    removed,
+                    changed,
+                    unchanged,
+                    similarity_weight,
+                    page_total_chars,
+                ) = future.result()
+
+                # Save final page result
+                self.page_diffs.append({
+                    "page_num": page_num + 1,
+                    "dev_lines": dev_lines,
+                    "prod_lines": prod_lines,
+                    "diff": diff
+                })
+
+                # Update counters
+                total_added += added
+                total_removed += removed
+                total_changed += changed
+                total_unchanged += unchanged
+                matching_chars += similarity_weight
+                total_chars += page_total_chars
+
+                # Progress
+                if (idx + 1) % 100 == 0:
+                    print(f"\r      Comparing {max_pages} pages... {idx + 1}/{max_pages}", end="", flush=True)
+
+        print(f"\r      Comparing {max_pages} pages... Done!     ")
+
+        # Store pre-calculated metrics
+        self._precalc_changes = {
+            "added": total_added,
+            "removed": total_removed,
+            "modified": total_changed,
+            "unchanged": total_unchanged,
+        }
+
+        self._precalc_similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
+
+
         print(f"\r      Comparing {max_pages} pages... Done!     ")
         
         # Store pre-calculated metrics
@@ -945,7 +1008,7 @@ class BatchPDFComparator:
         print(f"\n🌐 Now generating master summary report...")
         
         # Auto-generate summary
-        from core.comparators.pdf.pdf_generate_summary import PdfSummaryGenerator
+        from pdf_generate_summary import PdfSummaryGenerator
         summary_gen = PdfSummaryGenerator(str(self.output_dir))
         summary_path = summary_gen.generate_summary()
         

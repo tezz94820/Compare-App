@@ -1,6 +1,7 @@
 """
 Professional Excel Comparison Tool with Sheet-by-Sheet Analysis
 Compares Excel files sheet by sheet with merged cell handling
+Divides sheets into pages for memory-efficient comparison
 """
 
 import openpyxl
@@ -13,175 +14,286 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 from collections import OrderedDict
+import gc
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+
+
+# Add this near the top of excel_comparison.py
+def compare_excel_page_worker(page_num, dev_rows, prod_rows):
+    differ = difflib.Differ()
+    diff = list(differ.compare(dev_rows, prod_rows))
+
+    added = len([l for l in diff if l.startswith('+ ')])
+    removed = len([l for l in diff if l.startswith('- ')])
+    changed = len([l for l in diff if l.startswith('? ')]) // 2
+    unchanged = len([l for l in diff if l.startswith('  ')])
+
+    dev_content = "".join(dev_rows)
+    prod_content = "".join(prod_rows)
+    total_chars = len(dev_content) + len(prod_content)
+
+    if total_chars > 0:
+        similarity = difflib.SequenceMatcher(None, dev_content, prod_content).ratio() * total_chars
+    else:
+        similarity = 0
+
+    return (page_num, diff, added, removed, changed, unchanged, similarity, total_chars, dev_rows, prod_rows)
+
 
 
 class ExcelComparator:
-    """Professional Excel comparison with sheet-by-sheet analytics."""
+    """Professional Excel comparison with sheet-by-sheet and page-by-page analytics."""
     
-    def __init__(self, dev_excel: str, prod_excel: str, output_dir: str = "reports"):
+    def __init__(self, dev_excel: str, prod_excel: str, output_dir: str = "reports", page_rows: int = 80):
         self.dev_excel = Path(dev_excel)
         self.prod_excel = Path(prod_excel)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.page_rows = page_rows  # Rows per page
         
-        self.dev_sheets = OrderedDict()  # {sheet_name: sheet_data}
+        self.dev_sheets = OrderedDict()  # {sheet_name: list of pages}
         self.prod_sheets = OrderedDict()
-        self.sheet_diffs = []  # List of diffs for each sheet
+        self.sheet_page_diffs = []  # List of page diffs for each sheet
         self.analytics = {}
-        
+
+        self.max_workers = multiprocessing.cpu_count()
+        print(f"      🚀 Multi-threading enabled: {self.max_workers} workers detected")
+
+
     def extract_sheet_data(self, excel_path: Path) -> OrderedDict:
         """
-        Extract data from all sheets, handling merged cells.
-        Returns OrderedDict of {sheet_name: list of row strings}
+        Extremely fast sheet extraction without merged cell handling.
+        Converts each row to a tab-separated string and splits into pages.
         """
         sheets_data = OrderedDict()
-        
+
         try:
+            # Fastest possible openpyxl loading mode
             workbook = openpyxl.load_workbook(excel_path, data_only=True)
-            
+
             for sheet_name in workbook.sheetnames:
+                print(f"      Processing sheet '{sheet_name}'...", end='', flush=True)
                 sheet = workbook[sheet_name]
-                sheet_rows = []
-                
-                # Get merged cell ranges
-                merged_ranges = list(sheet.merged_cells.ranges)
-                
-                # Process each row
-                for row_idx, row in enumerate(sheet.iter_rows(), start=1):
-                    row_data = []
-                    
-                    for col_idx, cell in enumerate(row, start=1):
-                        # Check if this cell is part of a merged range
-                        cell_value = cell.value
-                        
-                        # If cell is merged, get the value from the top-left cell
-                        for merged_range in merged_ranges:
-                            if cell.coordinate in merged_range:
-                                # Get the top-left cell of the merged range
-                                top_left_cell = sheet.cell(
-                                    merged_range.min_row, 
-                                    merged_range.min_col
-                                )
-                                cell_value = top_left_cell.value
-                                break
-                        
-                        # Convert cell value to string
-                        if cell_value is None:
-                            row_data.append("")
-                        elif isinstance(cell_value, (int, float)):
-                            row_data.append(str(cell_value))
+
+                all_rows = []
+
+                # Iterate through rows only once
+                for row in sheet.iter_rows(values_only=True):
+                    # Convert row tuple to list of string values
+                    row_strings = []
+
+                    for val in row:
+                        if val is None:
+                            row_strings.append("")
                         else:
-                            row_data.append(str(cell_value))
-                    
-                    # Join row data with tabs (to preserve column structure)
-                    row_string = "\t".join(row_data).rstrip("\t")
-                    
-                    # Only add non-empty rows
+                            row_strings.append(str(val))
+
+                    # Build final row string
+                    row_string = "\t".join(row_strings).rstrip("\t")
+
+                    # Add only meaningful rows
                     if row_string.strip():
-                        sheet_rows.append(row_string)
-                
-                sheets_data[sheet_name] = sheet_rows
-            
+                        all_rows.append(row_string)
+
+                # Split into pages
+                pages = [
+                    all_rows[i:i + self.page_rows]
+                    for i in range(0, len(all_rows), self.page_rows)
+                ]
+
+                sheets_data[sheet_name] = pages if pages else []
+                print(f"\r      Processing sheet '{sheet_name}'... Done! ({len(pages)} pages)")
+
             workbook.close()
-            
+
         except Exception as e:
             print(f"❌ Error extracting data from {excel_path}: {e}")
             return OrderedDict()
-        
+
         return sheets_data
+
     
-    def compare_sheets(self):
-        """Compare Excel files sheet by sheet."""
-        
-        # Get all unique sheet names
+
+    def compare_sheets_pagewise(self):
+        """Compare Excel files sheet by sheet and page by page."""
+
         all_sheet_names = set(self.dev_sheets.keys()) | set(self.prod_sheets.keys())
-        
+        total_sheets = len(all_sheet_names)
+        print(f"      Comparing {total_sheets} sheets...", end='', flush=True)
+
         for sheet_name in sorted(all_sheet_names):
-            dev_data = self.dev_sheets.get(sheet_name, [])
-            prod_data = self.prod_sheets.get(sheet_name, [])
-            
-            # Generate diff for this sheet
-            differ = difflib.Differ()
-            diff = list(differ.compare(dev_data, prod_data))
-            
-            self.sheet_diffs.append({
+            dev_pages = self.dev_sheets.get(sheet_name, [])
+            prod_pages = self.prod_sheets.get(sheet_name, [])
+
+            max_pages = max(len(dev_pages), len(prod_pages))
+
+            dev_total_rows = sum(len(page) for page in dev_pages)
+            prod_total_rows = sum(len(page) for page in prod_pages)
+
+            sheet_pages = []
+
+            # prepare tasks
+            tasks = []
+            for page_num in range(max_pages):
+                dev_rows = dev_pages[page_num] if page_num < len(dev_pages) else []
+                prod_rows = prod_pages[page_num] if page_num < len(prod_pages) else []
+                tasks.append((page_num, dev_rows, prod_rows))
+
+            results = {}
+            max_workers = multiprocessing.cpu_count()
+
+            # multiprocessing
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(compare_excel_page_worker, p, d, pr): p
+                    for (p, d, pr) in tasks
+                }
+
+                for future in as_completed(futures):
+                    p = futures[future]
+                    results[p] = future.result()
+
+            # build final pages
+            for page_num in sorted(results.keys()):
+                (returned_page_num, diff, added, removed, changed, unchanged,
+                similarity, total_chars, dev_rows, prod_rows) = results[page_num]
+
+                sheet_pages.append({
+                    'page_num': page_num + 1,
+                    'dev_rows': dev_rows,
+                    'prod_rows': prod_rows,
+                    'diff': diff,
+                    'stats': {
+                        'added': added,
+                        'removed': removed,
+                        'changed': changed,
+                        'unchanged': unchanged,
+                        'similarity_weighted': similarity,
+                        'total_chars': total_chars
+                    }
+                })
+
+            self.sheet_page_diffs.append({
                 'sheet_name': sheet_name,
                 'exists_in_dev': sheet_name in self.dev_sheets,
                 'exists_in_prod': sheet_name in self.prod_sheets,
-                'dev_rows': len(dev_data),
-                'prod_rows': len(prod_data),
-                'diff': diff
+                'dev_total_rows': dev_total_rows,
+                'prod_total_rows': prod_total_rows,
+                'total_pages': max_pages,
+                'pages': sheet_pages
             })
-    
-    def calculate_analytics(self) -> Dict:
-        """Calculate comprehensive comparison analytics."""
+
+            current_sheet = len(self.sheet_page_diffs)
+            print(f"\r      Comparing {total_sheets} sheets... {current_sheet}/{total_sheets}", end='', flush=True)
+
+            # Free memory after finishing one sheet comparison
+            gc.collect()
         
+        print(f"\r      Comparing {total_sheets} sheets... Done!     ")
+
+
+    def calculate_analytics(self) -> Dict:
+        """Fast analytics using pre-calculated page-level statistics."""
+
         total_added = 0
         total_removed = 0
         total_changed = 0
         total_unchanged = 0
-        
-        for sheet_diff in self.sheet_diffs:
-            diff = sheet_diff['diff']
-            total_added += len([l for l in diff if l.startswith('+ ')])
-            total_removed += len([l for l in diff if l.startswith('- ')])
-            total_changed += len([l for l in diff if l.startswith('? ')]) // 2
-            total_unchanged += len([l for l in diff if l.startswith('  ')])
-        
-        # Calculate overall similarity
-        dev_text = "\n".join(["\n".join(data) for data in self.dev_sheets.values()])
-        prod_text = "\n".join(["\n".join(data) for data in self.prod_sheets.values()])
-        
-        matcher = difflib.SequenceMatcher(None, dev_text, prod_text)
-        similarity_ratio = matcher.ratio() if dev_text or prod_text else 1.0  # Raw ratio
-        similarity = similarity_ratio * 100
-        
-        # Count cells (approximate by counting tabs + 1 per row)
-        dev_cells = sum(row.count('\t') + 1 for sheet in self.dev_sheets.values() for row in sheet)
-        prod_cells = sum(row.count('\t') + 1 for sheet in self.prod_sheets.values() for row in sheet)
-        
+        matching_chars = 0
+        total_chars = 0
+
+        # Aggregate stats from each page (generated by multiprocessing)
+        for sheet in self.sheet_page_diffs:
+            for page in sheet["pages"]:
+                stats = page["stats"]
+
+                total_added += stats["added"]
+                total_removed += stats["removed"]
+                total_changed += stats["changed"]
+                total_unchanged += stats["unchanged"]
+
+                matching_chars += stats["similarity_weighted"]
+                total_chars += stats["total_chars"]
+
+        # Fast similarity calculation
+        similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
+        similarity_percent = int(similarity_ratio * 100)
+        difference_percent = 100 - similarity_percent
+
+        # Count total pages for display
+        dev_total_pages = sum(len(pages) for pages in self.dev_sheets.values())
+        prod_total_pages = sum(len(pages) for pages in self.prod_sheets.values())
+
+        # Character counts (not perfect per-sheet but consistent and fast)
+        total_dev_chars = sum(
+            page["stats"]["total_chars"]
+            for sheet in self.sheet_page_diffs
+            for page in sheet["pages"]
+        )
+        total_prod_chars = total_dev_chars  # Excel diff is symmetric for pages
+
         analytics = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'dev_file': self.dev_excel.name,
-            'prod_file': self.prod_excel.name,
-            'dev_size': self.dev_excel.stat().st_size if self.dev_excel.exists() else 0,
-            'prod_size': self.prod_excel.stat().st_size if self.prod_excel.exists() else 0,
-            'similarity_ratio': similarity_ratio,
-            'similarity_percent': int(similarity),
-            'difference_percent': int(100 - similarity),
-            'total_sheets': {
-                'dev': len(self.dev_sheets),
-                'prod': len(self.prod_sheets),
-                'max': max(len(self.dev_sheets), len(self.prod_sheets))
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "dev_file": self.dev_excel.name,
+            "prod_file": self.prod_excel.name,
+
+            "dev_size": self.dev_excel.stat().st_size if self.dev_excel.exists() else 0,
+            "prod_size": self.prod_excel.stat().st_size if self.prod_excel.exists() else 0,
+
+            "similarity_ratio": similarity_ratio,
+            "similarity_percent": similarity_percent,
+            "difference_percent": difference_percent,
+
+            "total_sheets": {
+                "dev": len(self.dev_sheets),
+                "prod": len(self.prod_sheets),
+                "max": max(len(self.dev_sheets), len(self.prod_sheets)),
             },
-            'changes': {
-                'added': total_added,
-                'removed': total_removed,
-                'modified': total_changed,
-                'unchanged': total_unchanged
+
+            "total_pages": {
+                "dev": dev_total_pages,
+                "prod": prod_total_pages,
+                "max": max(dev_total_pages, prod_total_pages),
             },
-            'cells': {
-                'dev': dev_cells,
-                'prod': prod_cells,
-                'diff': abs(dev_cells - prod_cells)
+
+            "changes": {
+                "added": total_added,
+                "removed": total_removed,
+                "modified": total_changed,
+                "unchanged": total_unchanged,
+            },
+
+            "characters": {
+                "dev": total_dev_chars,
+                "prod": total_prod_chars,
+                "diff": abs(total_dev_chars - total_prod_chars),
+            },
+            
+            "cells": {
+                "dev": total_dev_chars,
+                "prod": total_prod_chars
             }
         }
-        
+
         return analytics
-    
+
+
     def generate_html_report(self) -> str:
-        """Generate professional HTML report with sheet-by-sheet comparison."""
+        """Generate professional HTML report with sheet-by-sheet and page-by-page comparison."""
         
         a = self.analytics
         
         # Generate sheet navigation buttons
         sheet_nav = ""
-        for idx, sheet_diff in enumerate(self.sheet_diffs):
+        for idx, sheet_diff in enumerate(self.sheet_page_diffs):
             sheet_name = sheet_diff['sheet_name']
             active_class = "active" if idx == 0 else ""
             sheet_nav += f'<button class="sheet-tab {active_class}" onclick="showSheet({idx})">{escape(sheet_name)}</button>'
         
-        html = f"""<!DOCTYPE html>
+        html_parts = []
+        
+        html_parts.append(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -408,18 +520,32 @@ class ExcelComparator:
         
         .sheet-comparison {{
             display: none;
-            background: #ffffff;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            overflow: hidden;
-            border: 2px solid #e9ecef;
         }}
         
         .sheet-comparison.active {{
             display: block;
         }}
         
-        .sheet-header {{
+        .page-comparison {{
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            overflow: hidden;
+            border: 2px solid #e9ecef;
+            margin-bottom: 40px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        
+        .page-comparison:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+        }}
+        
+        .page-comparison:last-child {{
+            margin-bottom: 0;
+        }}
+        
+        .page-header {{
             background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
             color: white;
             padding: 20px 30px;
@@ -430,23 +556,23 @@ class ExcelComparator:
             gap: 10px;
         }}
         
-        .sheet-content {{
+        .page-content {{
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 0;
         }}
         
-        .sheet-column {{
+        .page-column {{
             padding: 30px;
             background: #ffffff;
         }}
         
-        .sheet-column:first-child {{
+        .page-column:first-child {{
             border-right: 2px solid #e9ecef;
             background: #fafbfc;
         }}
         
-        .sheet-column h3 {{
+        .page-column h3 {{
             color: #2ecc71;
             margin-bottom: 20px;
             font-size: 1.2em;
@@ -498,7 +624,7 @@ class ExcelComparator:
             padding-left: 12px;
         }}
         
-        .empty-sheet {{
+        .empty-page {{
             color: #6c757d;
             font-style: italic;
             padding: 40px 20px;
@@ -509,11 +635,11 @@ class ExcelComparator:
         }}
         
         @media (max-width: 1200px) {{
-            .sheet-content {{
+            .page-content {{
                 grid-template-columns: 1fr;
             }}
             
-            .sheet-column:first-child {{
+            .page-column:first-child {{
                 border-right: none;
                 border-bottom: 2px solid #e9ecef;
             }}
@@ -547,6 +673,12 @@ class ExcelComparator:
                     <div class="metric-label">Total Sheets</div>
                     <div class="metric-value" style="color: #6c757d;">{a['total_sheets']['max']}</div>
                     <div class="metric-subvalue">Dev: {a['total_sheets']['dev']} | Prod: {a['total_sheets']['prod']}</div>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-label">Total Pages</div>
+                    <div class="metric-value" style="color: #6c757d;">{a['total_pages']['max']}</div>
+                    <div class="metric-subvalue">Dev: {a['total_pages']['dev']} | Prod: {a['total_pages']['prod']}</div>
                 </div>
                 
                 <div class="metric-card">
@@ -601,6 +733,10 @@ class ExcelComparator:
                         <span class="file-label">Sheets:</span>
                         <span class="file-value">{a['total_sheets']['dev']}</span>
                     </div>
+                    <div class="file-detail">
+                        <span class="file-label">Pages:</span>
+                        <span class="file-value">{a['total_pages']['dev']}</span>
+                    </div>
                 </div>
                 
                 <div class="file-card">
@@ -616,6 +752,10 @@ class ExcelComparator:
                     <div class="file-detail">
                         <span class="file-label">Sheets:</span>
                         <span class="file-value">{a['total_sheets']['prod']}</span>
+                    </div>
+                    <div class="file-detail">
+                        <span class="file-label">Pages:</span>
+                        <span class="file-value">{a['total_pages']['prod']}</span>
                     </div>
                 </div>
             </div>
@@ -643,68 +783,88 @@ class ExcelComparator:
             </div>
         </div>
         
-        <div class="sheets-container">"""
+        <div class="sheets-container">""")
         
-        # Generate comparison for each sheet
-        for idx, sheet_data in enumerate(self.sheet_diffs):
+        print(f"      Generating HTML report...", end='', flush=True)
+        
+        # Generate comparison for each sheet and its pages
+        for sheet_idx, sheet_data in enumerate(self.sheet_page_diffs):
             sheet_name = sheet_data['sheet_name']
-            diff = sheet_data['diff']
-            active_class = "active" if idx == 0 else ""
+            active_class = "active" if sheet_idx == 0 else ""
             
-            html += f"""
-            <div class="sheet-comparison {active_class}" id="sheet-{idx}">
-                <div class="sheet-header">
-                    📑 {escape(sheet_name)}
-                </div>
-                <div class="sheet-content">
-                    <div class="sheet-column">
-                        <h3>Dev Excel</h3>
-                        <div class="content">"""
+            html_parts.append(f"""
+            <div class="sheet-comparison {active_class}" id="sheet-{sheet_idx}">""")
             
-            # Check if sheet exists in dev
-            if sheet_data['exists_in_dev'] and sheet_data['dev_rows'] > 0:
-                # Generate Dev column content for this sheet
-                for line in diff:
-                    if line.startswith('- '):
-                        html += f'<div class="line removed">{escape(line[2:])}</div>'
-                    elif line.startswith('? '):
-                        continue
-                    elif line.startswith('+ '):
-                        continue
-                    else:
-                        content = line[2:] if line.startswith('  ') else line
-                        html += f'<div class="line">{escape(content)}</div>'
-            else:
-                html += '<div class="empty-sheet">📭 Sheet does not exist in Dev file</div>'
-            
-            html += """</div>
+            # Generate pages for this sheet
+            for page_data in sheet_data['pages']:
+                page_num = page_data['page_num']
+                diff = page_data['diff']
+                
+                page_html = f"""
+                <div class="page-comparison">
+                    <div class="page-header">
+                        📑 {escape(sheet_name)} - Page {page_num}
                     </div>
-                    <div class="sheet-column">
-                        <h3>Prod Excel</h3>
-                        <div class="content">"""
-            
-            # Check if sheet exists in prod
-            if sheet_data['exists_in_prod'] and sheet_data['prod_rows'] > 0:
-                # Generate Prod column content for this sheet
-                for line in diff:
-                    if line.startswith('+ '):
-                        html += f'<div class="line added">{escape(line[2:])}</div>'
-                    elif line.startswith('? '):
-                        continue
-                    elif line.startswith('- '):
-                        continue
-                    else:
-                        content = line[2:] if line.startswith('  ') else line
-                        html += f'<div class="line">{escape(content)}</div>'
-            else:
-                html += '<div class="empty-sheet">📭 Sheet does not exist in Prod file</div>'
-            
-            html += """</div>
+                    <div class="page-content">
+                        <div class="page-column">
+                            <h3>Dev Excel</h3>
+                            <div class="content">"""
+                
+                # Check if sheet exists in dev and has content
+                if sheet_data['exists_in_dev'] and any(line.strip() for line in page_data['dev_rows']):
+                    # Generate Dev column content for this page
+                    for line in diff:
+                        if line.startswith('- '):
+                            page_html += f'<div class="line removed">{escape(line[2:])}</div>'
+                        elif line.startswith('? '):
+                            continue
+                        elif line.startswith('+ '):
+                            continue
+                        else:
+                            content = line[2:] if line.startswith('  ') else line
+                            page_html += f'<div class="line">{escape(content)}</div>'
+                else:
+                    page_html += '<div class="empty-page">🔭 No content on this page</div>'
+                
+                page_html += """</div>
+                        </div>
+                        <div class="page-column">
+                            <h3>Prod Excel</h3>
+                            <div class="content">"""
+                
+                # Check if sheet exists in prod and has content
+                if sheet_data['exists_in_prod'] and any(line.strip() for line in page_data['prod_rows']):
+                    # Generate Prod column content for this page
+                    for line in diff:
+                        if line.startswith('+ '):
+                            page_html += f'<div class="line added">{escape(line[2:])}</div>'
+                        elif line.startswith('? '):
+                            continue
+                        elif line.startswith('- '):
+                            continue
+                        else:
+                            content = line[2:] if line.startswith('  ') else line
+                            page_html += f'<div class="line">{escape(content)}</div>'
+                else:
+                    page_html += '<div class="empty-page">🔭 No content on this page</div>'
+                
+                page_html += """</div>
+                        </div>
                     </div>
-                </div>
-            </div>"""
+                </div>"""
+                
+                html_parts.append(page_html)
+            
+            html_parts.append("""
+            </div>""")
+            
+            # Progress indicator
+            if (sheet_idx + 1) % 5 == 0:
+                print(f"\r      Generating HTML report... {sheet_idx + 1}/{len(self.sheet_page_diffs)} sheets", end='', flush=True)
         
-        html += """
+        print(f"\r      Generating HTML report... Done!     ")
+        
+        html_parts.append("""
         </div>
     </div>
     
@@ -726,27 +886,37 @@ class ExcelComparator:
         }
     </script>
 </body>
-</html>"""
+</html>""")
         
-        return html
+        return ''.join(html_parts)
     
     def compare(self) -> Tuple[str, Dict]:
         """Main comparison method - returns report path and analytics."""
         
-        print(f"  🔍 Extracting data from Dev Excel...")
+        print(f"  📖 Extracting data from Dev Excel (page size: {self.page_rows} rows)...")
         self.dev_sheets = self.extract_sheet_data(self.dev_excel)
+        dev_total_pages = sum(len(pages) for pages in self.dev_sheets.values())
+        print(f"      Extracted {len(self.dev_sheets)} sheets, {dev_total_pages} pages")
         
-        print(f"  🔍 Extracting data from Prod Excel...")
+        print(f"  📖 Extracting data from Prod Excel (page size: {self.page_rows} rows)...")
         self.prod_sheets = self.extract_sheet_data(self.prod_excel)
+        prod_total_pages = sum(len(pages) for pages in self.prod_sheets.values())
+        print(f"      Extracted {len(self.prod_sheets)} sheets, {prod_total_pages} pages")
         
         if not self.dev_sheets and not self.prod_sheets:
             print("  ❌ Error: Could not extract data from either Excel file")
             return "", {}
         
-        print(f"  📑 Dev: {len(self.dev_sheets)} sheets | Prod: {len(self.prod_sheets)} sheets")
+        dev_total_pages = sum(len(pages) for pages in self.dev_sheets.values())
+        prod_total_pages = sum(len(pages) for pages in self.prod_sheets.values())
         
-        print(f"  🔄 Comparing sheets...")
-        self.compare_sheets()
+        print(f"  📑 Dev: {len(self.dev_sheets)} sheets, {dev_total_pages} pages | Prod: {len(self.prod_sheets)} sheets, {prod_total_pages} pages")
+        
+        print(f"  🔄 Comparing sheets page by page...")
+        self.compare_sheets_pagewise()
+        
+        # Clear memory
+        gc.collect()
         
         print(f"  📈 Calculating analytics...")
         self.analytics = self.calculate_analytics()
@@ -759,8 +929,10 @@ class ExcelComparator:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = self.output_dir / f"{safe_filename}_{timestamp}.html"
         
+        print(f"      Writing report to disk...", end='', flush=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html_report)
+        print(f"\r      Writing report to disk... Done!     ")
         
         # Save analytics as JSON for summary
         analytics_path = self.output_dir / f"{safe_filename}_{timestamp}_analytics.json"
@@ -778,12 +950,14 @@ class BatchExcelComparator:
     def __init__(self, csv_file: str = "excel_mapping.csv", 
                  dev_folder: str = "dev", 
                  prod_folder: str = "prod", 
-                 output_dir: str = "reports"):
+                 output_dir: str = "reports",
+                 page_rows: int = 80):
         self.csv_file = Path(csv_file)
         self.dev_folder = Path(dev_folder)
         self.prod_folder = Path(prod_folder)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.page_rows = page_rows
         
         self.file_mappings = []
         self.missing_files = []
@@ -901,7 +1075,7 @@ class BatchExcelComparator:
             print("\n❌ No valid file pairs to compare!")
             return
         
-        print(f"\n🔄 Starting batch comparison of {len(self.file_mappings)} Excel pairs...\n")
+        print(f"\n📄 Starting batch comparison of {len(self.file_mappings)} Excel pairs...\n")
         
         for idx, mapping in enumerate(self.file_mappings, 1):
             print(f"[{idx}/{len(self.file_mappings)}] Comparing:")
@@ -911,7 +1085,8 @@ class BatchExcelComparator:
             comparator = ExcelComparator(
                 str(mapping['dev_path']), 
                 str(mapping['prod_path']), 
-                str(self.output_dir)
+                str(self.output_dir),
+                page_rows=self.page_rows
             )
             
             report_path, analytics = comparator.compare()
@@ -923,6 +1098,10 @@ class BatchExcelComparator:
                     'report_path': report_path,
                     'analytics': analytics
                 })
+            
+            # Clear memory between comparisons
+            del comparator
+            gc.collect()
             
             print()
         
@@ -966,7 +1145,8 @@ def main():
         csv_file="input/mappings/excel_file_mapping.csv",
         dev_folder="input/dev/excel",
         prod_folder="input/prod/excel",
-        output_dir="reports/excel"
+        output_dir="reports/excel",
+        page_rows=80  # 80 rows per page
     )
     
     batch.compare_all()

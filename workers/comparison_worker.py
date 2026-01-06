@@ -107,13 +107,15 @@ class ComparisonWorker(QThread):
                         comparator = ExcelComparator(
                             str(mapping['dev_path']),
                             str(mapping['prod_path']),
-                            str(self.output_folder)
+                            str(self.output_folder),
+                            80
                         )
                     elif(app_state.get_file_type() == 'txt'):
                         comparator = TXTComparator(
                             str(mapping['dev_path']),
                             str(mapping['prod_path']),
-                            str(self.output_folder)
+                            str(self.output_folder),
+                            80
                         )
                     
                     report_path, analytics = comparator.compare()
