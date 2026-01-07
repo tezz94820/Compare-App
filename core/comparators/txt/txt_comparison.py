@@ -147,7 +147,10 @@ class TXTComparator:
         completed_count = 0
         results = {}  # Store results by page_num to maintain order
         
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+         # MULTIPROCESSING EXECUTION
+        ctx = multiprocessing.get_context("spawn")
+
+        with ProcessPoolExecutor( max_workers=ctx.cpu_count(), mp_context=ctx ) as executor:
             # Submit all tasks
             future_to_page = {
                 executor.submit(compare_page_worker, page_num, dev_lines, prod_lines): page_num

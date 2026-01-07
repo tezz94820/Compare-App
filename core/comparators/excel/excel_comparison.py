@@ -150,8 +150,10 @@ class ExcelComparator:
             results = {}
             max_workers = multiprocessing.cpu_count()
 
-            # multiprocessing
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # MULTIPROCESSING EXECUTION
+            ctx = multiprocessing.get_context("spawn")
+
+            with ProcessPoolExecutor( max_workers=ctx.cpu_count(), mp_context=ctx ) as executor:
                 futures = {
                     executor.submit(compare_excel_page_worker, p, d, pr): p
                     for (p, d, pr) in tasks

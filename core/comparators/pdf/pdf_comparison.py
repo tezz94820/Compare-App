@@ -15,6 +15,7 @@ from typing import Dict, List, Tuple, Set
 from collections import Counter
 import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 
 def pdf_page_worker(page_num, dev_content, prod_content):
@@ -129,7 +130,9 @@ class PDFComparator:
         total_pages = max_pages
         
         # MULTIPROCESSING EXECUTION
-        with ProcessPoolExecutor() as executor:
+        ctx = multiprocessing.get_context("spawn")
+
+        with ProcessPoolExecutor( max_workers=ctx.cpu_count(), mp_context=ctx ) as executor:
             future_to_page = {
                 executor.submit(pdf_page_worker, page_num, dev, prod): page_num
                 for (page_num, dev, prod) in tasks
