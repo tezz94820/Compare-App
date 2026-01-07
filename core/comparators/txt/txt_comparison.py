@@ -542,7 +542,7 @@ class TXTComparator:
         
         .page-content {{
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
             gap: 0;
         }}
         
@@ -572,8 +572,10 @@ class TXTComparator:
             font-family: 'Courier New', 'Consolas', monospace;
             font-size: 13px;
             line-height: 1.6;
-            white-space: pre-wrap;
-            word-wrap: break-word;
+            white-space: pre-wrap;       
+            overflow-wrap: anywhere;    
+            word-break: break-word;     
+            max-width: 100%;
         }}
         
         .line {{
@@ -581,6 +583,9 @@ class TXTComparator:
             margin: 2px 0;
             border-radius: 4px;
             transition: all 0.15s;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }}
         
         .line:hover {{
