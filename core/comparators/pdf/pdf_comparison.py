@@ -30,12 +30,11 @@ def pdf_page_worker(page_num, dev_content, prod_content):
     unchanged = len([l for l in diff if l.startswith('  ')])
 
     # Weighted similarity
-    page_total = len(dev_content) + len(prod_content)
-    if page_total > 0:
+    if dev_content or prod_content:
         matcher = difflib.SequenceMatcher(None, dev_content, prod_content)
-        similarity = matcher.ratio() * page_total
+        page_similarity = matcher.ratio()
     else:
-        similarity = 0
+        page_similarity = 1.0  
 
     return (
         page_num,
@@ -46,8 +45,7 @@ def pdf_page_worker(page_num, dev_content, prod_content):
         removed,
         changed,
         unchanged,
-        similarity,
-        page_total,
+        page_similarity,
     )
 
 
@@ -104,8 +102,10 @@ class PDFComparator:
         total_unchanged = 0
         
         # Incremental similarity calculation
-        matching_chars = 0
-        total_chars = 0
+        # matching_chars = 0
+        # total_chars = 0
+        total_page_similarity = 0.0
+        page_count = 0
         
         print(f"      Comparing {max_pages} pages...", end='', flush=True)
       
@@ -145,8 +145,7 @@ class PDFComparator:
                     removed,
                     changed,
                     unchanged,
-                    similarity_weight,
-                    page_total_chars,
+                    page_similarity,
                 ) = future.result()
 
                 completed_pages += 1
@@ -166,8 +165,11 @@ class PDFComparator:
                 total_removed += removed
                 total_changed += changed
                 total_unchanged += unchanged
-                matching_chars += similarity_weight
-                total_chars += page_total_chars
+                # matching_chars += similarity_weight
+                # total_chars += page_total_chars
+                total_page_similarity += page_similarity
+                page_count += 1
+
 
                 # Progress
                 if (idx + 1) % 100 == 0:
@@ -183,7 +185,10 @@ class PDFComparator:
             "unchanged": total_unchanged,
         }
 
-        self._precalc_similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
+        self._precalc_similarity_ratio = (
+            total_page_similarity / page_count
+            if page_count > 0 else 1.0
+        )
 
 
         print(f"\r      Comparing {max_pages} pages... Done!     ")
@@ -197,7 +202,7 @@ class PDFComparator:
         }
         
         # Calculate average similarity from page-level similarities
-        self._precalc_similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
+        # self._precalc_similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
     
     def calculate_analytics(self) -> Dict:
         """Calculate comprehensive comparison analytics using pre-calculated values."""

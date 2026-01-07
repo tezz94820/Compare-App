@@ -30,15 +30,14 @@ def compare_page_worker(page_num, dev_page_lines, prod_page_lines):
 
     dev_content = "".join(dev_page_lines)
     prod_content = "".join(prod_page_lines)
-    page_total = len(dev_content) + len(prod_content)
-
-    if page_total > 0:
+    
+    if dev_content or prod_content:
         matcher = difflib.SequenceMatcher(None, dev_content, prod_content)
-        similarity = matcher.ratio() * page_total
+        page_similarity = matcher.ratio()
     else:
-        similarity = 0
-
-    return (page_num, diff, page_added, page_removed, page_changed, page_unchanged, similarity, page_total, dev_page_lines, prod_page_lines)
+        page_similarity = 1.0 
+    
+    return (page_num, diff, page_added, page_removed, page_changed, page_unchanged, page_similarity, dev_page_lines, prod_page_lines)
 
 
 
@@ -132,8 +131,8 @@ class TXTComparator:
         total_removed = 0
         total_changed = 0
         total_unchanged = 0
-        matching_chars = 0
-        total_chars = 0
+        total_page_similarity = 0.0
+        page_count = 0
         
         print(f"      Comparing {max_pages} pages in parallel...", end='', flush=True)
         
@@ -159,7 +158,7 @@ class TXTComparator:
             for future in as_completed(future_to_page):
                 page_num = future_to_page[future]
                 try:
-                    (page_num, diff, added, removed, changed, unchanged, similarity, total_chars, dev_lines, prod_lines) = future.result()
+                    (page_num, diff, added, removed, changed, unchanged, page_similarity, dev_lines, prod_lines) = future.result()
 
                     results[page_num] = {
                         'page_num': page_num,
@@ -171,8 +170,7 @@ class TXTComparator:
                             'removed': removed,
                             'changed': changed,
                             'unchanged': unchanged,
-                            'similarity_weighted': similarity,
-                            'total_chars': total_chars
+                            'page_similarity': page_similarity
                         }
                     }
 
@@ -218,8 +216,8 @@ class TXTComparator:
                 total_removed += stats['removed']
                 total_changed += stats['changed']
                 total_unchanged += stats['unchanged']
-                matching_chars += stats['similarity_weighted']
-                total_chars += stats['total_chars']
+                total_page_similarity += stats['page_similarity']
+                page_count += 1
         
         # Store pre-calculated metrics (same as before)
         self._precalc_changes = {
@@ -229,7 +227,10 @@ class TXTComparator:
             'unchanged': total_unchanged
         }
         
-        self._precalc_similarity_ratio = matching_chars / total_chars if total_chars > 0 else 1.0
+        self._precalc_similarity_ratio = (
+            total_page_similarity / page_count
+            if page_count > 0 else 1.0
+        )        
         
         # Pre-calculate character and word counts
         dev_total_chars = sum(len("".join(page_diff['dev_lines'])) for page_diff in self.page_diffs)

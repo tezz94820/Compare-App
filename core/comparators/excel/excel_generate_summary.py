@@ -72,8 +72,6 @@ class ExcelSummaryGenerator:
         total_sheets_dev = sum(a['total_sheets']['dev'] for a in self.analytics_data)
         total_sheets_prod = sum(a['total_sheets']['prod'] for a in self.analytics_data)
         
-        total_cells_dev = sum(a['cells']['dev'] for a in self.analytics_data)
-        total_cells_prod = sum(a['cells']['prod'] for a in self.analytics_data)
         
         # Find files with most changes
         most_changes = sorted(self.analytics_data, 
@@ -104,10 +102,6 @@ class ExcelSummaryGenerator:
             'sheets': {
                 'dev': total_sheets_dev,
                 'prod': total_sheets_prod
-            },
-            'cells': {
-                'dev': total_cells_dev,
-                'prod': total_cells_prod
             },
             'top_changed_files': most_changes,
             'least_similar_files': least_similar
